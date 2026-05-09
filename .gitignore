@@ -1,0 +1,14 @@
+.env
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+
+# Trained models (large binary files — store in object storage or registry)
+models/
+*.pkl
+*.lgb
+*.json.model

@@ -1,0 +1,23 @@
+services:
+  train:
+    build:
+      context: .
+      dockerfile: Dockerfile.train
+    env_file: .env
+    volumes:
+      - models:/app/models
+    profiles:
+      - train
+
+  predict:
+    build:
+      context: .
+      dockerfile: Dockerfile.predict
+    env_file: .env
+    volumes:
+      - models:/app/models
+    profiles:
+      - predict
+
+volumes:
+  models:
