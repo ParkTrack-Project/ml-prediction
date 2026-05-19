@@ -1,0 +1,86 @@
+---
+sidebar_label: Weather Observations
+---
+
+# Weather Observations
+
+The ML service collects hourly weather data from [Open-Meteo](https://open-meteo.com) for each camera location and stores it in the `weather_observations` table. This data is used as features during model training and inference to improve occupancy forecasts.
+
+Weather is fetched automatically — no manual action required after the service starts.
+
+---
+
+## Database Table
+
+```sql
+CREATE TABLE weather_observations (
+    id            SERIAL PRIMARY KEY,
+    camera_id     INTEGER NOT NULL REFERENCES cameras(camera_id),
+    observed_at   TIMESTAMPTZ NOT NULL,
+    temperature   FLOAT NOT NULL,         -- °C
+    precipitation FLOAT NOT NULL DEFAULT 0.0,  -- mm/h
+    source        VARCHAR(50) NOT NULL DEFAULT 'open_meteo',
+    fetched_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (camera_id, observed_at)
+);
+```
+
+### Fields
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | integer | Auto-increment primary key |
+| `camera_id` | integer | References `cameras.camera_id` |
+| `observed_at` | timestamptz | Hour of observation (always truncated to :00:00 UTC) |
+| `temperature` | float | Air temperature at 2m height, °C |
+| `precipitation` | float | Total precipitation in the hour, mm |
+| `source` | varchar | Data source identifier (`open_meteo`) |
+| `fetched_at` | timestamptz | When the row was inserted |
+
+---
+
+## Data Source
+
+**Open-Meteo** — free, no API key required.
+
+- Historical data: `https://archive-api.open-meteo.com/v1/archive`
+- Forecast data:   `https://api.open-meteo.com/v1/forecast`
+
+Variables fetched: `temperature_2m`, `precipitation`.
+
+Coverage: one row per camera per hour. On startup the service backfills the last 200 days. After that, a scheduled job runs at `:05` every hour to fetch the latest 48-hour window.
+
+---
+
+## Integration with Forecasting
+
+Weather features used by the ML model:
+
+| Feature | Derived from | Description |
+|---|---|---|
+| `temperature` | `temperature` | Air temperature at prediction time, °C |
+| `is_precipitation` | `precipitation > 0` | 1 if rain/snow, 0 otherwise |
+
+When a weather observation is missing for a given zone and time (e.g., a new camera with no history), the model falls back to a monthly seasonal average:
+
+| Month | Fallback °C |
+|---|---|
+| Jan | −5 | Feb | −4 | Mar | 2 |
+| Apr | 9 | May | 15 | Jun | 20 |
+| Jul | 22 | Aug | 20 | Sep | 14 |
+| Oct | 7 | Nov | 1 | Dec | −3 |
+
+`is_precipitation` falls back to `0`.
+
+---
+
+## Extending the Schema
+
+If additional weather variables are needed (e.g., wind speed, cloud cover), add columns to `weather_observations` and update the `_fetch_open_meteo` call in `weather.py`:
+
+```python
+# weather.py — _fetch_open_meteo()
+params['hourly'] = 'temperature_2m,precipitation,wind_speed_10m,cloudcover'
+```
+
+Then add the new features to `FEATURE_NAMES` in `config.py` and retrain.
