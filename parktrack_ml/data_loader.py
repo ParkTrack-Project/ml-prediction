@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from .config import API_URL, API_TOKEN
 from .api_client import ParkTrackClient
+
+log = logging.getLogger(__name__)
+
+_CHUNK_DAYS = 7
 
 
 def _client() -> ParkTrackClient:
@@ -48,6 +53,28 @@ def _parse_occupancy(records: list) -> pd.DataFrame:
     return df.sort_values(["zone_id", "observed_at"]).reset_index(drop=True)
 
 
+def _date_chunks(from_dt: datetime, to_dt: datetime, days: int = _CHUNK_DAYS):
+    """Yield (chunk_from, chunk_to) pairs covering [from_dt, to_dt] with step=days."""
+    cur = from_dt
+    while cur < to_dt:
+        nxt = min(cur + timedelta(days=days), to_dt)
+        yield cur, nxt
+        cur = nxt
+
+
+def _fetch_chunked(client: ParkTrackClient, zone_id: int | None,
+                   from_dt: datetime, to_dt: datetime) -> pd.DataFrame:
+    frames = []
+    for chunk_from, chunk_to in _date_chunks(from_dt, to_dt):
+        log.debug("occupancy chunk zone=%s %s – %s", zone_id, chunk_from, chunk_to)
+        records = client.get_occupancy(zone_id=zone_id, from_dt=chunk_from, to_dt=chunk_to)
+        frames.append(_parse_occupancy(records))
+    if not frames:
+        return _parse_occupancy([])
+    result = pd.concat(frames, ignore_index=True)
+    return result.drop_duplicates(subset=["zone_id", "observed_at"]).reset_index(drop=True)
+
+
 def load_observations(
     zone_ids: Optional[List[int]] = None,
     from_dt:  Optional[datetime]  = None,
@@ -55,13 +82,21 @@ def load_observations(
 ) -> pd.DataFrame:
     """Load raw occupancy observations. Returns zone_id, observed_at, occupied, capacity, occupancy_rate."""
     client = _client()
+
+    if from_dt is None or to_dt is None:
+        # Short window — single request is fine
+        if zone_ids:
+            frames = [
+                _parse_occupancy(client.get_occupancy(zone_id=zid, from_dt=from_dt, to_dt=to_dt))
+                for zid in zone_ids
+            ]
+            return pd.concat(frames, ignore_index=True) if frames else _parse_occupancy([])
+        return _parse_occupancy(client.get_occupancy(from_dt=from_dt, to_dt=to_dt))
+
     if zone_ids:
-        frames = [
-            _parse_occupancy(client.get_occupancy(zone_id=zid, from_dt=from_dt, to_dt=to_dt))
-            for zid in zone_ids
-        ]
+        frames = [_fetch_chunked(client, zid, from_dt, to_dt) for zid in zone_ids]
         return pd.concat(frames, ignore_index=True) if frames else _parse_occupancy([])
-    return _parse_occupancy(client.get_occupancy(from_dt=from_dt, to_dt=to_dt))
+    return _fetch_chunked(client, None, from_dt, to_dt)
 
 
 def load_recent_observations(zone_id: int, before_dt: datetime, hours: int = 25) -> pd.DataFrame:
