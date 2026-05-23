@@ -1,134 +1,84 @@
-"""
-Database access layer for the ML module.
-All queries go through this file — change DB schema here, not elsewhere.
-"""
-import psycopg2
-import psycopg2.extras
+"""Data loading via ParkTrack API."""
+
+from __future__ import annotations
+
 import pandas as pd
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
 from typing import List, Optional
 
-from .config import DB_CONFIG
+from .config import API_URL, API_TOKEN
+from .api_client import ParkTrackClient
 
 
-# ---------------------------------------------------------------------------
-# Connection
-# ---------------------------------------------------------------------------
+def _client() -> ParkTrackClient:
+    return ParkTrackClient(API_URL, API_TOKEN)
 
-def _connect():
-    return psycopg2.connect(**DB_CONFIG)
-
-
-def _query_df(query: str, params=None, columns: list = None) -> pd.DataFrame:
-    """Execute a query and return a DataFrame without pandas/psycopg2 warnings."""
-    conn = _connect()
-    try:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(query, params)
-            rows = cur.fetchall()
-    finally:
-        conn.close()
-    if not rows:
-        return pd.DataFrame(columns=columns or [])
-    return pd.DataFrame([dict(r) for r in rows])
-
-
-# ---------------------------------------------------------------------------
-# Zone metadata (static, cached after first load)
-# ---------------------------------------------------------------------------
 
 def load_zone_meta() -> pd.DataFrame:
-    """
-    Return DataFrame: zone_id, capacity, zone_type_standard (0/1).
-    Only active zones.
-    """
-    df = _query_df(
-        """
-        SELECT parking_zone_id AS zone_id, capacity, zone_type
-        FROM parking_zones
-        WHERE is_active = TRUE
-        ORDER BY parking_zone_id
-        """,
-        columns=['zone_id', 'capacity', 'zone_type'],
+    """Return DataFrame: zone_id, capacity, zone_type_standard (0/1). Only active zones."""
+    zones = _client().get_zones()
+    rows = []
+    for z in zones:
+        zid      = z.get("parking_zone_id") or z.get("id") or z.get("zone_id")
+        cap      = z.get("capacity", 10)
+        ztype    = z.get("zone_type", "standard")
+        is_active = z.get("is_active", True)
+        if not is_active or not zid:
+            continue
+        rows.append({
+            "zone_id":            int(zid),
+            "capacity":           int(cap),
+            "zone_type_standard": int(ztype == "standard"),
+        })
+    df = pd.DataFrame(rows) if rows else pd.DataFrame(
+        columns=["zone_id", "capacity", "zone_type_standard"]
     )
-    df['zone_type_standard'] = (df['zone_type'] == 'standard').astype(int)
-    return df[['zone_id', 'capacity', 'zone_type_standard']]
+    return df.sort_values("zone_id").reset_index(drop=True)
 
 
-# ---------------------------------------------------------------------------
-# Occupancy observations
-# ---------------------------------------------------------------------------
+def _parse_occupancy(records: list) -> pd.DataFrame:
+    empty_cols = ["zone_id", "observed_at", "occupied", "capacity", "occupancy_rate"]
+    if not records:
+        return pd.DataFrame(columns=empty_cols)
+    df = pd.DataFrame(records)
+    df["observed_at"] = pd.to_datetime(df["observed_at"], utc=True)
+    df["occupied"]    = df["occupied"].astype(int)
+    df["capacity"]    = df["capacity"].astype(int)
+    df["occupancy_rate"] = df["occupied"] / df["capacity"].clip(lower=1)
+    return df.sort_values(["zone_id", "observed_at"]).reset_index(drop=True)
+
 
 def load_observations(
     zone_ids: Optional[List[int]] = None,
     from_dt:  Optional[datetime]  = None,
     to_dt:    Optional[datetime]  = None,
 ) -> pd.DataFrame:
-    """
-    Load raw observations.
-    Returns: zone_id, observed_at (tz-aware UTC), occupied, capacity, occupancy_rate
-    """
-    conditions: list = []
-    params: list = []
-
+    """Load raw occupancy observations. Returns zone_id, observed_at, occupied, capacity, occupancy_rate."""
+    client = _client()
     if zone_ids:
-        conditions.append('zone_id = ANY(%s)')
-        params.append(zone_ids)
-    if from_dt:
-        conditions.append('observed_at >= %s')
-        params.append(from_dt)
-    if to_dt:
-        conditions.append('observed_at < %s')
-        params.append(to_dt)
-
-    where = ('WHERE ' + ' AND '.join(conditions)) if conditions else ''
-
-    df = _query_df(
-        f"""
-        SELECT zone_id, observed_at, occupied, capacity
-        FROM occupancy_observations
-        {where}
-        ORDER BY zone_id, observed_at
-        """,
-        params=params or None,
-        columns=['zone_id', 'observed_at', 'occupied', 'capacity'],
-    )
-
-    if not df.empty:
-        df['observed_at'] = pd.to_datetime(df['observed_at'], utc=True)
-        df['occupancy_rate'] = df['occupied'] / df['capacity'].clip(lower=1)
-
-    return df
+        frames = [
+            _parse_occupancy(client.get_occupancy(zone_id=zid, from_dt=from_dt, to_dt=to_dt))
+            for zid in zone_ids
+        ]
+        return pd.concat(frames, ignore_index=True) if frames else _parse_occupancy([])
+    return _parse_occupancy(client.get_occupancy(from_dt=from_dt, to_dt=to_dt))
 
 
 def load_recent_observations(zone_id: int, before_dt: datetime, hours: int = 25) -> pd.DataFrame:
-    """
-    Load the most recent `hours` hours of observations for one zone.
-    Used at inference time to build lag/MA features.
-    """
+    """Load the most recent `hours` of observations for a zone. Used at inference time."""
     from_dt = before_dt - timedelta(hours=hours)
     return load_observations(zone_ids=[zone_id], from_dt=from_dt, to_dt=before_dt)
 
 
-# ---------------------------------------------------------------------------
-# Hourly aggregation
-# ---------------------------------------------------------------------------
-
 def aggregate_hourly(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Aggregate raw observations to hourly buckets per zone.
-    Returns: zone_id, hour (datetime), occupancy_rate, capacity
-    """
+    """Aggregate raw observations to hourly buckets per zone."""
+    if df.empty:
+        return df
     df = df.copy()
-    # Floor to hour; works for both tz-aware and naive timestamps
-    df['hour'] = df['observed_at'].dt.floor('h')
-
+    df["hour"] = df["observed_at"].dt.floor("h")
     hourly = (
-        df.groupby(['zone_id', 'hour'])
-        .agg(
-            occupancy_rate=('occupancy_rate', 'mean'),
-            capacity=('capacity', 'max'),
-        )
+        df.groupby(["zone_id", "hour"])
+        .agg(occupancy_rate=("occupancy_rate", "mean"), capacity=("capacity", "max"))
         .reset_index()
     )
-    return hourly.sort_values(['zone_id', 'hour']).reset_index(drop=True)
+    return hourly.sort_values(["zone_id", "hour"]).reset_index(drop=True)
