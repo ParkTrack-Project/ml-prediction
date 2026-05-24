@@ -8,6 +8,18 @@ from .config import (
     THRESHOLD_LOW, THRESHOLD_MEDIUM, TEMP_FALLBACK_BY_MONTH,
 )
 
+# Russian federal holidays (month, day) — fixed dates only
+_RU_HOLIDAYS = {
+    (1, 1), (1, 2), (1, 3), (1, 4), (1, 5),
+    (1, 6), (1, 7), (1, 8),   # New Year + Christmas
+    (2, 23),                   # Defender of the Fatherland Day
+    (3, 8),                    # International Women's Day
+    (5, 1),                    # Spring & Labor Day
+    (5, 9),                    # Victory Day
+    (6, 12),                   # Russia Day
+    (11, 4),                   # National Unity Day
+}
+
 
 def label_occupancy(rate: float) -> int:
     if rate < THRESHOLD_LOW:
@@ -17,15 +29,34 @@ def label_occupancy(rate: float) -> int:
     return 2
 
 
+def _is_holiday(month: int, day: int) -> int:
+    return int((month, day) in _RU_HOLIDAYS)
+
+
 def _add_time_features(df: pd.DataFrame) -> pd.DataFrame:
     dt = df['hour']
     df = df.copy()
-    df['hour']         = dt.dt.hour
-    df['day_of_week']  = dt.dt.dayofweek
-    df['month']        = dt.dt.month
+    h   = dt.dt.hour
+    dow = dt.dt.dayofweek
+    mon = dt.dt.month
+
+    df['hour']         = h
+    df['day_of_week']  = dow
+    df['month']        = mon
     df['day_of_month'] = dt.dt.day
     df['quarter']      = dt.dt.quarter
-    df['is_weekend']   = (dt.dt.dayofweek >= 5).astype(int)
+    df['is_weekend']   = (dow >= 5).astype(int)
+
+    df['hour_sin']  = np.sin(2 * np.pi * h  / 24)
+    df['hour_cos']  = np.cos(2 * np.pi * h  / 24)
+    df['dow_sin']   = np.sin(2 * np.pi * dow / 7)
+    df['dow_cos']   = np.cos(2 * np.pi * dow / 7)
+    df['month_sin'] = np.sin(2 * np.pi * mon / 12)
+    df['month_cos'] = np.cos(2 * np.pi * mon / 12)
+
+    df['is_holiday'] = df.apply(
+        lambda r: _is_holiday(int(r['month']), int(r['day_of_month'])), axis=1
+    )
     return df
 
 
@@ -51,20 +82,12 @@ def build_training_dataset(
     zone_meta_df: pd.DataFrame,
     weather_df:   Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
-    """
-    Build the training dataset from hourly occupancy + zone metadata + optional weather.
-    Drops rows where lag features are NaN (insufficient history).
-    Returns DataFrame with FEATURE_NAMES columns and 'label'.
-    """
-    # Rename datetime column before adding time features
-    df = hourly_df.rename(columns={'hour': 'hour'}).copy()
-    # stash the original datetime for merges
+    df = hourly_df.copy()
     df['_hour_dt'] = df['hour']
     df = _add_time_features(df)
     df = _add_lag_features(df)
     df = _add_ma_features(df)
 
-    # Zone metadata
     meta = zone_meta_df[['zone_id', 'capacity', 'zone_type_standard']].copy()
     df = df.merge(meta, on='zone_id', how='left', suffixes=('_obs', '_meta'))
     if 'capacity_meta' in df.columns:
@@ -72,7 +95,6 @@ def build_training_dataset(
         df.drop(columns=['capacity_obs', 'capacity_meta'], inplace=True)
     df['zone_type_standard'] = df['zone_type_standard'].fillna(1).astype(int)
 
-    # Weather
     if weather_df is not None and not weather_df.empty:
         df = df.merge(
             weather_df[['zone_id', 'hour', 'temperature', 'is_precipitation']],
@@ -83,7 +105,6 @@ def build_training_dataset(
         )
         if 'hour_w' in df.columns:
             df.drop(columns=['hour_w'], inplace=True)
-        # Fill gaps with seasonal fallback
         df['is_precipitation'] = df['is_precipitation'].fillna(0).astype(int)
         df['temperature'] = df.apply(
             lambda r: r['temperature'] if pd.notna(r['temperature'])
@@ -91,11 +112,10 @@ def build_training_dataset(
             axis=1,
         )
     else:
-        df['temperature']    = df['month'].map(TEMP_FALLBACK_BY_MONTH).fillna(10)
+        df['temperature']      = df['month'].map(TEMP_FALLBACK_BY_MONTH).fillna(10)
         df['is_precipitation'] = 0
 
     df.drop(columns=['_hour_dt'], inplace=True, errors='ignore')
-
     df['label'] = df['occupancy_rate'].apply(label_occupancy)
 
     lag_ma_cols = [c for c in FEATURE_NAMES if 'lag' in c or 'ma_' in c]
@@ -105,46 +125,47 @@ def build_training_dataset(
 
 
 def build_prediction_vector(
-    zone_id:      int,
+    zone_id:       int,
     predicted_for: datetime,
     recent_hourly: pd.DataFrame,
-    zone_meta:    Dict,
-    weather:      Tuple[Optional[float], Optional[int]] = (None, None),
+    zone_meta:     Dict,
+    weather:       Tuple[Optional[float], Optional[int]] = (None, None),
 ) -> np.ndarray:
-    """
-    Build a single feature vector for inference.
-
-    weather: (temperature, is_precipitation) — pass result from weather.get_at().
-             Falls back to seasonal average if None.
-    """
     dt = pd.Timestamp(predicted_for)
     if dt.tzinfo is None:
         dt = dt.tz_localize('UTC')
 
-    # Time
+    h   = dt.hour
+    dow = dt.dayofweek
+    mon = dt.month
+
     feats: Dict = {
-        'hour':         dt.hour,
-        'day_of_week':  dt.dayofweek,
-        'month':        dt.month,
+        'hour':         h,
+        'day_of_week':  dow,
+        'month':        mon,
         'day_of_month': dt.day,
         'quarter':      dt.quarter,
-        'is_weekend':   int(dt.dayofweek >= 5),
+        'is_weekend':   int(dow >= 5),
+        'hour_sin':     float(np.sin(2 * np.pi * h   / 24)),
+        'hour_cos':     float(np.cos(2 * np.pi * h   / 24)),
+        'dow_sin':      float(np.sin(2 * np.pi * dow / 7)),
+        'dow_cos':      float(np.cos(2 * np.pi * dow / 7)),
+        'month_sin':    float(np.sin(2 * np.pi * mon / 12)),
+        'month_cos':    float(np.cos(2 * np.pi * mon / 12)),
+        'is_holiday':   _is_holiday(mon, dt.day),
+        'zone_id':      int(zone_id),
+        'capacity':           int(zone_meta.get('capacity', 10)),
+        'zone_type_standard': int(zone_meta.get('zone_type_standard', 1)),
     }
 
-    # Zone
-    feats['capacity']           = int(zone_meta.get('capacity', 10))
-    feats['zone_type_standard'] = int(zone_meta.get('zone_type_standard', 1))
-
-    # Weather
     temp, is_prec = weather
     feats['temperature']     = float(temp) if temp is not None else float(TEMP_FALLBACK_BY_MONTH.get(dt.month, 10))
     feats['is_precipitation'] = int(is_prec) if is_prec is not None else 0
 
-    # Occupancy lags & MAs
     FALLBACK = 0.5
     if recent_hourly.empty:
-        for h in LAG_HOURS:
-            feats[f'occupancy_lag_{h}h'] = FALLBACK
+        for h_ in LAG_HOURS:
+            feats[f'occupancy_lag_{h_}h'] = FALLBACK
         for w in MA_WINDOWS:
             feats[f'occupancy_ma_{w}h'] = FALLBACK
     else:
@@ -152,8 +173,8 @@ def build_prediction_vector(
         pred_hour = dt.floor('h')
         history   = history[history.index < pred_hour]
 
-        def get_lag(h):
-            t = pred_hour - pd.Timedelta(hours=h)
+        def get_lag(lag_h):
+            t = pred_hour - pd.Timedelta(hours=lag_h)
             if t in history.index:
                 return float(history[t])
             prior = history[history.index <= t]
@@ -163,8 +184,8 @@ def build_prediction_vector(
             window = history[history.index >= pred_hour - pd.Timedelta(hours=w)]
             return float(window.mean()) if not window.empty else FALLBACK
 
-        for h in LAG_HOURS:
-            feats[f'occupancy_lag_{h}h'] = get_lag(h)
+        for lag_h in LAG_HOURS:
+            feats[f'occupancy_lag_{lag_h}h'] = get_lag(lag_h)
         for w in MA_WINDOWS:
             feats[f'occupancy_ma_{w}h'] = get_ma(w)
 

@@ -1,5 +1,5 @@
 """
-Training pipeline — logistic regression on data from the ParkTrack API.
+Training pipeline — LightGBM on data from the ParkTrack API.
 
 Usage:
     python -m parktrack_ml.train
@@ -11,19 +11,41 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 
+import numpy as np
+
 from .config import (
-    MODEL_PATH, MODEL_WEIGHTS_FILE, SCALER_FILE, ZONE_META_FILE,
-    FEATURE_NAMES, MODEL_PARAMS, TRAIN_DAYS_BACK,
+    MODEL_PATH, MODEL_FILE, ZONE_META_FILE,
+    FEATURE_NAMES, CATEGORICAL_FEATURES,
+    LGBM_PARAMS, TRAIN_DAYS_BACK,
 )
 from .data_loader import load_observations, load_zone_meta, aggregate_hourly
 from .features import build_training_dataset
-from .model import CustomLogisticRegression, CustomScaler
+from .model import LGBMWrapper
 
 logger = logging.getLogger(__name__)
 CLASS_NAMES = {0: "Low", 1: "Medium", 2: "High"}
 
 
-def train(save: bool = True):
+def _metrics(y_true: np.ndarray, y_pred: np.ndarray) -> None:
+    acc = float((y_pred == y_true).mean())
+    logger.info("  Accuracy: %.3f", acc)
+    for cls, name in CLASS_NAMES.items():
+        mask = y_true == cls
+        if not mask.any():
+            continue
+        tp = int(((y_pred == cls) & mask).sum())
+        fp = int(((y_pred == cls) & ~mask).sum())
+        fn = int(((y_pred != cls) & mask).sum())
+        p  = tp / (tp + fp) if (tp + fp) else 0.0
+        r  = tp / (tp + fn) if (tp + fn) else 0.0
+        f1 = 2 * p * r / (p + r) if (p + r) else 0.0
+        logger.info(
+            "  %-8s  precision=%.2f  recall=%.2f  f1=%.2f  support=%d",
+            name, p, r, f1, mask.sum(),
+        )
+
+
+def train(save: bool = True) -> LGBMWrapper:
     os.makedirs(MODEL_PATH, exist_ok=True)
 
     zone_meta_df = load_zone_meta()
@@ -32,7 +54,8 @@ def train(save: bool = True):
     to_dt   = datetime.now(tz=timezone.utc)
     from_dt = to_dt - timedelta(days=TRAIN_DAYS_BACK)
 
-    raw_df = load_observations(from_dt=from_dt, to_dt=to_dt)
+    zone_ids = zone_meta_df["zone_id"].tolist()
+    raw_df = load_observations(zone_ids=zone_ids, from_dt=from_dt, to_dt=to_dt)
     logger.info("Observations: %d rows", len(raw_df))
 
     hourly_df = aggregate_hourly(raw_df)
@@ -48,27 +71,37 @@ def train(save: bool = True):
 
     dataset = build_training_dataset(hourly_df, zone_meta_df, weather_df)
     n = len(dataset)
-    logger.info("Dataset: %d samples", n)
+    logger.info("Dataset: %d samples, %d features", n, len(FEATURE_NAMES))
     for cls, name in CLASS_NAMES.items():
-        cnt = (dataset["label"] == cls).sum()
+        cnt = int((dataset["label"] == cls).sum())
         logger.info("  %s: %d (%.1f%%)", name, cnt, cnt / n * 100)
 
+    # Temporal train/val split — last 20% as validation (preserves time order)
+    dataset = dataset.sort_values("hour").reset_index(drop=True) if "hour" in dataset.columns else dataset
+    split = int(n * 0.8)
     X = dataset[FEATURE_NAMES].values.astype(float)
     y = dataset["label"].values.astype(int)
+    X_train, X_val = X[:split], X[split:]
+    y_train, y_val = y[:split], y[split:]
 
-    scaler = CustomScaler()
-    X_scaled = scaler.fit_transform(X)
+    # Find categorical feature indices
+    cat_indices = [FEATURE_NAMES.index(f) for f in CATEGORICAL_FEATURES if f in FEATURE_NAMES]
 
-    model = CustomLogisticRegression(**MODEL_PARAMS)
+    model = LGBMWrapper(params=dict(LGBM_PARAMS))
     model.feature_names = FEATURE_NAMES
-    model.fit(X_scaled, y)
+    model.fit(X_train, y_train, categorical_feature=cat_indices if cat_indices else None)
 
-    acc = float((model.predict(X_scaled) == y).mean())
-    logger.info("Train accuracy: %.3f", acc)
+    logger.info("--- Train set ---")
+    _metrics(y_train, model.predict(X_train))
+    logger.info("--- Val set ---")
+    _metrics(y_val, model.predict(X_val))
+
+    importance = model.feature_importance()
+    top10 = list(importance.items())[:10]
+    logger.info("Top-10 features by gain: %s", top10)
 
     if save:
-        scaler.save(SCALER_FILE)
-        model.save_weights(MODEL_WEIGHTS_FILE)
+        model.save(MODEL_FILE)
 
         zone_meta_dict = {
             int(k): {kk: int(vv) for kk, vv in v.items()}
@@ -81,9 +114,9 @@ def train(save: bool = True):
         with open(ZONE_META_FILE, "w") as f:
             json.dump(zone_meta_dict, f, indent=2)
 
-        logger.info("Saved to %s/", MODEL_PATH)
+        logger.info("Saved to %s", MODEL_FILE)
 
-    return model, scaler
+    return model
 
 
 if __name__ == "__main__":

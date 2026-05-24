@@ -11,53 +11,44 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal, Optional
 
-from .config import MODEL_WEIGHTS_FILE, SCALER_FILE, ZONE_META_FILE, FEATURE_NAMES
-from .model import CustomLogisticRegression, CustomScaler
+from .config import MODEL_FILE, ZONE_META_FILE, FEATURE_NAMES
+from .model import LGBMWrapper
 from .predict import predict_for_zone
 
 
 @dataclass
 class PredictOutput:
-    occupancy_class:       Literal["Low", "Medium", "High"]
-    class_code:            Literal[0, 1, 2]
-    confidence:            float
-    prob_low:              float
-    prob_medium:           float
-    prob_high:             float
-    predicted_occupied:    int
+    occupancy_class:        Literal["Low", "Medium", "High"]
+    class_code:             Literal[0, 1, 2]
+    confidence:             float
+    prob_low:               float
+    prob_medium:            float
+    prob_high:              float
+    predicted_occupied:     int
     probability_free_space: float
-    capacity:              int
+    capacity:               int
 
 
-_model:     Optional[CustomLogisticRegression] = None
-_scaler:    Optional[CustomScaler]             = None
-_zone_meta: Optional[dict]                     = None
+_model:     Optional[LGBMWrapper] = None
+_zone_meta: Optional[dict]        = None
 
 
-def _load_once():
-    global _model, _scaler, _zone_meta
+def _load_once() -> None:
+    global _model, _zone_meta
     if _model is not None:
         return
 
-    if set(FEATURE_NAMES) != set(_load_feature_names_from_file()):
-        raise RuntimeError("Feature mismatch — retrain the model first (python train.py)")
+    _model = LGBMWrapper.load(MODEL_FILE)
 
-    _model = CustomLogisticRegression()
-    _model.load_weights(MODEL_WEIGHTS_FILE)
-
-    _scaler = CustomScaler()
-    _scaler.load(SCALER_FILE)
+    saved_features = _model.feature_names or []
+    if saved_features and set(saved_features) != set(FEATURE_NAMES):
+        raise RuntimeError(
+            f"Feature mismatch — model has {len(saved_features)} features, "
+            f"config has {len(FEATURE_NAMES)}. Retrain: python -m parktrack_ml.train"
+        )
 
     with open(ZONE_META_FILE) as f:
         _zone_meta = {int(k): v for k, v in json.load(f).items()}
-
-
-def _load_feature_names_from_file():
-    try:
-        with open(MODEL_WEIGHTS_FILE) as f:
-            return json.load(f).get('feature_names', FEATURE_NAMES)
-    except FileNotFoundError:
-        return FEATURE_NAMES
 
 
 def predict(zone_id: int, predicted_for: datetime) -> PredictOutput:
@@ -65,7 +56,7 @@ def predict(zone_id: int, predicted_for: datetime) -> PredictOutput:
     _load_once()
 
     meta = _zone_meta.get(zone_id, {'capacity': 10, 'zone_type_standard': 1})
-    raw  = predict_for_zone(zone_id, predicted_for, _model, _scaler, meta)
+    raw  = predict_for_zone(zone_id, predicted_for, _model, meta)
 
     return PredictOutput(
         occupancy_class=raw['class'],
@@ -80,8 +71,8 @@ def predict(zone_id: int, predicted_for: datetime) -> PredictOutput:
     )
 
 
-def reload():
+def reload() -> None:
     """Reload model artifacts from disk (call after retraining)."""
-    global _model, _scaler, _zone_meta
-    _model = _scaler = _zone_meta = None
+    global _model, _zone_meta
+    _model = _zone_meta = None
     _load_once()

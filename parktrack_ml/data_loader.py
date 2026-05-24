@@ -12,7 +12,7 @@ from .api_client import ParkTrackClient
 
 log = logging.getLogger(__name__)
 
-_CHUNK_DAYS = 7
+_CHUNK_DAYS = 4
 
 
 def _client() -> ParkTrackClient:
@@ -102,6 +102,7 @@ def load_observations(
 
     if zone_ids:
         frames = [_fetch_chunked(client, zid, from_dt, to_dt) for zid in zone_ids]
+        frames = [f for f in frames if not f.empty]
         return pd.concat(frames, ignore_index=True) if frames else _parse_occupancy([])
     return _fetch_chunked(client, None, from_dt, to_dt)
 
@@ -117,6 +118,8 @@ def aggregate_hourly(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
     df = df.copy()
+    df["observed_at"] = pd.to_datetime(df["observed_at"], utc=True, errors="coerce")
+    df = df.dropna(subset=["observed_at"])
     df["hour"] = df["observed_at"].dt.floor("h")
     hourly = (
         df.groupby(["zone_id", "hour"])

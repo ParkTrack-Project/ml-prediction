@@ -1,5 +1,5 @@
-import numpy as np
 import json
+import numpy as np
 
 
 class CustomScaler:
@@ -85,20 +85,79 @@ class CustomLogisticRegression:
     def save_weights(self, filename):
         with open(filename, 'w') as f:
             json.dump({
-                'weights':       self.weights.tolist(),
-                'bias':          self.bias.tolist(),
-                'classes':       self.classes.tolist(),
-                'feature_names': self.feature_names,
-                'learning_rate': self.learning_rate,
+                'weights':        self.weights.tolist(),
+                'bias':           self.bias.tolist(),
+                'classes':        self.classes.tolist(),
+                'feature_names':  self.feature_names,
+                'learning_rate':  self.learning_rate,
                 'regularization': self.regularization,
             }, f)
 
     def load_weights(self, filename):
         with open(filename, 'r') as f:
             d = json.load(f)
-        self.weights       = np.array(d['weights'])
-        self.bias          = np.array(d['bias'])
-        self.classes       = np.array(d['classes'])
-        self.feature_names = d['feature_names']
-        self.learning_rate = d['learning_rate']
+        self.weights        = np.array(d['weights'])
+        self.bias           = np.array(d['bias'])
+        self.classes        = np.array(d['classes'])
+        self.feature_names  = d['feature_names']
+        self.learning_rate  = d['learning_rate']
         self.regularization = d['regularization']
+
+
+class LGBMWrapper:
+    """LightGBM multiclass wrapper with same predict interface as CustomLogisticRegression."""
+
+    classes = np.array([0, 1, 2])
+
+    def __init__(self, params: dict | None = None):
+        self.params        = params or {}
+        self._booster      = None
+        self.feature_names = None
+
+    def fit(self, X: np.ndarray, y: np.ndarray,
+            categorical_feature: list[str] | None = None) -> None:
+        import lightgbm as lgb
+
+        n_estimators = self.params.pop("n_estimators", 500)
+        params = {**self.params, "verbose": -1}
+
+        feat_names = self.feature_names or [str(i) for i in range(X.shape[1])]
+        train_ds = lgb.Dataset(
+            X, label=y,
+            feature_name=feat_names,
+            categorical_feature=categorical_feature or "auto",
+        )
+        callbacks = [lgb.log_evaluation(period=50)]
+        self._booster = lgb.train(
+            params, train_ds,
+            num_boost_round=n_estimators,
+            callbacks=callbacks,
+        )
+        self.params["n_estimators"] = n_estimators
+
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        return self._booster.predict(X)
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        return self.classes[np.argmax(self.predict_proba(X), axis=1)]
+
+    def feature_importance(self) -> dict:
+        if self._booster is None:
+            return {}
+        names = self._booster.feature_name()
+        gains = self._booster.feature_importance(importance_type="gain")
+        total = gains.sum() or 1
+        return {n: round(float(g / total), 4) for n, g in sorted(
+            zip(names, gains), key=lambda x: -x[1]
+        )}
+
+    def save(self, path: str) -> None:
+        self._booster.save_model(path)
+
+    @classmethod
+    def load(cls, path: str) -> "LGBMWrapper":
+        import lightgbm as lgb
+        wrapper = cls()
+        wrapper._booster = lgb.Booster(model_file=path)
+        wrapper.feature_names = wrapper._booster.feature_name()
+        return wrapper
