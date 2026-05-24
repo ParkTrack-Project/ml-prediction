@@ -46,11 +46,16 @@ def _parse_occupancy(records: list) -> pd.DataFrame:
     if not records:
         return pd.DataFrame(columns=empty_cols)
     df = pd.DataFrame(records)
-    df["observed_at"] = pd.to_datetime(df["observed_at"], utc=True)
-    df["occupied"]    = df["occupied"].astype(int)
-    df["capacity"]    = df["capacity"].astype(int)
-    df["occupancy_rate"] = df["occupied"] / df["capacity"].clip(lower=1)
-    return df.sort_values(["zone_id", "observed_at"]).reset_index(drop=True)
+    df["observed_at"] = pd.to_datetime(df["observed_at"], utc=True, errors="coerce")
+    df["zone_id"]     = pd.to_numeric(df["zone_id"],  errors="coerce")
+    df["occupied"]    = pd.to_numeric(df["occupied"],  errors="coerce").fillna(0)
+    df["capacity"]    = pd.to_numeric(df["capacity"],  errors="coerce").fillna(1)
+    df = df.dropna(subset=["zone_id", "observed_at"])
+    df["zone_id"]  = df["zone_id"].astype(int)
+    df["occupied"] = df["occupied"].astype(int)
+    df["capacity"] = df["capacity"].clip(lower=1).astype(int)
+    df["occupancy_rate"] = df["occupied"] / df["capacity"]
+    return df[empty_cols].sort_values(["zone_id", "observed_at"]).reset_index(drop=True)
 
 
 def _date_chunks(from_dt: datetime, to_dt: datetime, days: int = _CHUNK_DAYS):
@@ -68,7 +73,9 @@ def _fetch_chunked(client: ParkTrackClient, zone_id: int | None,
     for chunk_from, chunk_to in _date_chunks(from_dt, to_dt):
         log.debug("occupancy chunk zone=%s %s – %s", zone_id, chunk_from, chunk_to)
         records = client.get_occupancy(zone_id=zone_id, from_dt=chunk_from, to_dt=chunk_to)
-        frames.append(_parse_occupancy(records))
+        df = _parse_occupancy(records)
+        if not df.empty:
+            frames.append(df)
     if not frames:
         return _parse_occupancy([])
     result = pd.concat(frames, ignore_index=True)
