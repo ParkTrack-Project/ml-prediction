@@ -9,5 +9,4 @@ COPY parktrack_ml/ ./parktrack_ml/
 
 ENV PYTHONPATH="/app"
 
-# Mount model volume at /app/models when running
-CMD ["python", "-m", "parktrack_ml.predict"]
+CMD ["python", "-m", "parktrack_ml.service"]
