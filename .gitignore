@@ -7,8 +7,9 @@ venv/
 dist/
 build/
 
-# Trained models (large binary files — store in object storage or registry)
+# Trained models and artifacts
 models/
+artifacts/
 *.pkl
 *.lgb
 *.json.model

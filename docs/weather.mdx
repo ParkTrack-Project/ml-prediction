@@ -1,0 +1,274 @@
+---
+sidebar_position: 13
+title: Weather
+---
+
+# 12. Weather
+
+Раздел описывает хранение и чтение погодных наблюдений, привязанных к камере и конкретному часу.
+
+## 7.1 Общие правила
+
+### Авторизация
+
+Все эндпоинты раздела требуют авторизации.
+Для эндпоинтов раздела используется системный токен авторизации, хранимый в переменных среды сервисов.
+
+```http
+Authorization: Bearer <access_token>
+```
+
+### Общие ошибки
+
+| Код     | Тип                      | Описание                                                  |
+|---------|--------------------------|-----------------------------------------------------------|
+| **400** | `Bad Request`            | Невалидный JSON или неверные типы полей.                  |
+| **401** | `Unauthorized`           | Токен отсутствует, невалиден, истёк или сессия завершена. |
+| **403** | `Forbidden`              | У пользователя недостаточно прав для выполнения действия. |
+| **404** | `Not Found`              | Камера или погодное наблюдение не найдены.                |
+| **409** | `Conflict`               | Наблюдение для этой камеры и этого часа уже существует.   |
+| **415** | `Unsupported Media Type` | Неверный `Content-Type`. Используй `application/json`.    |
+| **422** | `Unprocessable Entity`   | Ошибка валидации.                                         |
+| **500** | `Internal Server Error`  | Необработанная ошибка сервера.                            |
+| **503** | `Service Unavailable`    | Сервис временно недоступен.                               |
+
+Пример ответа:
+
+```json
+{
+  "error_description": "Validation error: observed_at must be truncated to hour"
+}
+```
+
+---
+
+## 7.2 Формат данных
+
+### Время
+
+Все временные значения передаются в формате UTC ISO 8601:
+
+```text
+2026-04-06T10:00:00Z
+```
+
+Поле `observed_at` хранит **час наблюдения**. Значение должно быть округлено до начала часа.
+
+Корректно:
+
+```text
+2026-04-06T10:00:00Z
+```
+
+Некорректно:
+
+```text
+2026-04-06T10:37:15Z
+```
+
+---
+
+## 7.3 Модель `WeatherObservation`
+
+Полная модель погодного наблюдения.
+
+- `camera_id` (`integer`) — идентификатор камеры, к которой привязана погода.
+- `observed_at` (`string`, ISO 8601) — час, к которому относится наблюдение.
+- `temperature` (`float`) — температура воздуха в градусах Цельсия.
+- `precipitation` (`float`, `>= 0`) — количество осадков в миллиметрах за указанный час.
+
+**Пример**
+
+```json
+{
+  "camera_id": 1,
+  "observed_at": "2026-04-06T10:00:00Z",
+  "temperature": 7.4,
+  "precipitation": 0.8
+}
+```
+
+---
+
+## 7.4 `GET /weather`
+
+Возвращает погодные наблюдения.
+
+**Query-параметры**
+
+- `camera_id` (`integer`, optional) — фильтр по камере.
+- `from` (`string`, ISO 8601, optional) — нижняя граница интервала по `observed_at`.
+- `to` (`string`, ISO 8601, optional) — верхняя граница интервала по `observed_at`.
+- `latest_only` (`boolean`, optional) — вернуть только последнее наблюдение по каждой камере.
+
+**Пример запроса**
+
+```http
+GET /api/v1/weather?camera_id=1&from=2026-04-06T00:00:00Z&to=2026-04-06T23:00:00Z HTTP/1.1
+Host: api.parktrack.live
+Authorization: Bearer <token>
+```
+
+**Response (200)** — массив объектов `WeatherObservation`
+
+**Пример ответа (200)**
+
+```json
+[
+  {
+    "camera_id": 1,
+    "observed_at": "2026-04-06T10:00:00Z",
+    "temperature": 7.4,
+    "precipitation": 0.8
+  },
+  {
+    "camera_id": 1,
+    "observed_at": "2026-04-06T11:00:00Z",
+    "temperature": 8.1,
+    "precipitation": 0.0
+  }
+]
+```
+
+**Ошибки**
+
+| Код     | Тип                    | Описание                                      |
+|---------|------------------------|-----------------------------------------------|
+| **401** | `Unauthorized`         | Токен отсутствует, невалиден или истёк.       |
+| **403** | `Forbidden`            | Недостаточно прав для просмотра погоды.       |
+| **422** | `Unprocessable Entity` | Ошибка валидации query-параметров.            |
+
+---
+
+## 7.5 `POST /weather/new`
+
+Создаёт новое погодное наблюдение.
+
+**Headers**
+
+- `Authorization: Bearer <access_token>`
+- `Content-Type: application/json`
+
+**Request body (required)**
+
+- `camera_id` (`integer`) — идентификатор камеры.
+- `observed_at` (`string`, ISO 8601) — час наблюдения.
+- `temperature` (`float`) — температура воздуха в градусах Цельсия.
+- `precipitation` (`float`, `>= 0`) — количество осадков в миллиметрах.
+
+**Пример запроса**
+
+```http
+POST /api/v1/weather/new HTTP/1.1
+Host: api.parktrack.live
+Content-Type: application/json
+Authorization: Bearer <token>
+
+{
+  "camera_id": 1,
+  "observed_at": "2026-04-06T10:00:00Z",
+  "temperature": 7.4,
+  "precipitation": 0.8
+}
+```
+
+**Response (201)**
+
+```json
+{
+  "camera_id": 1,
+  "observed_at": "2026-04-06T10:00:00Z"
+}
+```
+
+**Ошибки**
+
+| Код     | Тип                      | Описание                                                 |
+|---------|--------------------------|----------------------------------------------------------|
+| **400** | `Bad Request`            | Невалидное тело запроса.                                 |
+| **401** | `Unauthorized`           | Токен отсутствует, невалиден или истёк.                  |
+| **403** | `Forbidden`              | Недостаточно прав для записи погоды.                     |
+| **404** | `Not Found`              | Камера не найдена.                                       |
+| **409** | `Conflict`               | Наблюдение для этой камеры и этого часа уже существует.  |
+| **415** | `Unsupported Media Type` | Неверный `Content-Type`.                                 |
+| **422** | `Unprocessable Entity`   | Ошибка валидации данных.                                 |
+
+**Пример ответа (422)**
+
+```json
+{
+  "error_description": "Validation error: precipitation must be greater than or equal to 0"
+}
+```
+
+---
+
+## 7.6 `GET /weather/<camera_id>/<observed_at>`
+
+Возвращает погодное наблюдение для конкретной камеры и конкретного часа.
+
+**Path-параметры**
+
+- `camera_id` (`integer`, required) — идентификатор камеры.
+- `observed_at` (`string`, ISO 8601, required) — час наблюдения.
+
+**Headers**
+
+- `Authorization: Bearer <access_token>`
+
+**Пример запроса**
+
+```http
+GET /api/v1/weather/1/2026-04-06T10:00:00Z HTTP/1.1
+Host: api.parktrack.live
+Authorization: Bearer <token>
+```
+
+**Response (200)** — объект `WeatherObservation`
+
+**Пример ответа (200)**
+
+```json
+{
+  "camera_id": 1,
+  "observed_at": "2026-04-06T10:00:00Z",
+  "temperature": 7.4,
+  "precipitation": 0.8
+}
+```
+
+**Ошибки**
+
+| Код     | Тип                    | Описание                                      |
+|---------|------------------------|-----------------------------------------------|
+| **401** | `Unauthorized`         | Токен отсутствует, невалиден или истёк.       |
+| **403** | `Forbidden`            | Недостаточно прав для просмотра погоды.       |
+| **404** | `Not Found`            | Погодное наблюдение не найдено.               |
+| **422** | `Unprocessable Entity` | Неверный формат `observed_at`.                |
+
+---
+
+## 7.7 Требования к таблице `weather_observations`
+
+Рекомендуемая структура таблицы:
+
+```sql
+CREATE TABLE weather_observations (
+    camera_id      BIGINT NOT NULL REFERENCES cameras(camera_id),
+    observed_at    TIMESTAMPTZ NOT NULL,
+    temperature    DOUBLE PRECISION NOT NULL,
+    precipitation  DOUBLE PRECISION NOT NULL CHECK (precipitation >= 0),
+
+    PRIMARY KEY (camera_id, observed_at)
+);
+```
+
+### Правила
+
+- одна камера может иметь много погодных наблюдений;
+- одно наблюдение относится ровно к одному часу;
+- для одной камеры не может быть двух наблюдений с одинаковым `observed_at`;
+- `observed_at` должен быть округлён до начала часа;
+- `precipitation` не может быть отрицательным.
+
+---
