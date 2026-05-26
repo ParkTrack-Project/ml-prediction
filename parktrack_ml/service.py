@@ -19,7 +19,7 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.events import EVENT_JOB_ERROR
 
-from .config import MODEL_WEIGHTS_FILE, RETRAIN_HOUR_UTC, TRAIN_DAYS_BACK
+from .config import MODEL_FILE, RETRAIN_HOUR_UTC, TRAIN_DAYS_BACK
 from .weather import backfill as backfill_weather, fetch_latest as fetch_weather
 from .forecaster import run as generate_forecasts
 from .train import train
@@ -54,9 +54,14 @@ def startup() -> None:
     n = backfill_weather(days=TRAIN_DAYS_BACK)
     logger.info("  %d weather observations posted", n)
 
-    if not os.path.exists(MODEL_WEIGHTS_FILE):
+    if not os.path.exists(MODEL_FILE):
         logger.info("No saved model — training from scratch...")
-        train()
+        try:
+            train()
+        except RuntimeError as exc:
+            logger.error("Initial training failed: %s", exc)
+            logger.warning("Service will start without a model — forecasts will be skipped until retrain succeeds.")
+            return
 
     reload_model()
 
