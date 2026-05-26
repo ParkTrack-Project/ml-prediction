@@ -5,16 +5,20 @@ and publishes them to the ParkTrack API (/forecasts/new).
 from __future__ import annotations
 
 import logging
+import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 
 from .config import API_URL, API_TOKEN, ML_MODEL_TYPE, ML_MODEL_VERSION
 from .api_client import ParkTrackClient
 from .interfaces import predict
+from .data_loader import load_recent_observations, aggregate_hourly
 
 logger = logging.getLogger(__name__)
 
 _client: ParkTrackClient | None = None
+
+_EMPTY_HOURLY = pd.DataFrame(columns=["zone_id", "hour", "occupancy_rate", "capacity"])
 
 
 def _get_client() -> ParkTrackClient:
@@ -34,9 +38,9 @@ def _active_zone_ids() -> list[int]:
     )
 
 
-def _predict_and_post(zone_id: int, target_dt: datetime) -> bool:
+def _predict_and_post(zone_id: int, target_dt: datetime, recent_hourly: pd.DataFrame) -> bool:
     try:
-        result = predict(zone_id=zone_id, predicted_for=target_dt)
+        result = predict(zone_id=zone_id, predicted_for=target_dt, recent_hourly=recent_hourly)
         _get_client().post_forecast(
             zone_id=zone_id,
             model_type=ML_MODEL_TYPE,
@@ -76,11 +80,25 @@ def run() -> None:
         if base.replace(minute=m) + timedelta(hours=h) > now
     ][:48]
 
+    # Pre-fetch recent observations ONCE per zone, not once per (zone, slot).
+    # Without this we'd make zones×slots = potentially 720+ API calls per run.
+    recent_by_zone: dict[int, pd.DataFrame] = {}
+    for zid in zone_ids:
+        try:
+            raw = load_recent_observations(zid, now, hours=25)
+            recent_by_zone[zid] = aggregate_hourly(raw) if not raw.empty else _EMPTY_HOURLY
+        except Exception as exc:
+            logger.warning("Failed to load recent obs zone=%d: %s", zid, exc)
+            recent_by_zone[zid] = _EMPTY_HOURLY
+
     tasks   = [(z, t) for z in zone_ids for t in slots]
     success = 0
 
     with ThreadPoolExecutor(max_workers=10) as pool:
-        futures = {pool.submit(_predict_and_post, z, t): (z, t) for z, t in tasks}
+        futures = {
+            pool.submit(_predict_and_post, z, t, recent_by_zone.get(z, _EMPTY_HOURLY)): (z, t)
+            for z, t in tasks
+        }
         for f in as_completed(futures):
             if f.result():
                 success += 1
