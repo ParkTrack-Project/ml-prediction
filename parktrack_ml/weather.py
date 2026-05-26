@@ -105,13 +105,15 @@ def backfill(days: int = 200) -> int:
         try:
             data = _fetch_open_meteo(lat, lon, start_d, end_d)
             rows = _parse_hourly(cam_id, data)
+            new = 0
             for _, observed_at, temp, prec in rows:
                 try:
                     if client.post_weather(cam_id, observed_at, temp, prec):
-                        total += 1
+                        new += 1
                 except Exception:
                     pass
-            logger.info("  camera %d: %d rows fetched", cam_id, len(rows))
+            total += new
+            logger.debug("  camera %d: %d fetched, %d new", cam_id, len(rows), new)
         except Exception as exc:
             logger.warning("  camera %d: %s", cam_id, exc)
 
@@ -146,6 +148,8 @@ def fetch_latest() -> int:
         except Exception as exc:
             logger.warning("  camera %d: %s", cam_id, exc)
 
+    if total:
+        logger.info("Weather: %d new records posted", total)
     return total
 
 

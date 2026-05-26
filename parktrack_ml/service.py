@@ -30,6 +30,10 @@ logging.basicConfig(
     format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)],
 )
+# Suppress chatty third-party loggers — only warnings and above
+logging.getLogger("apscheduler").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("requests").setLevel(logging.WARNING)
 logger = logging.getLogger("service")
 
 
