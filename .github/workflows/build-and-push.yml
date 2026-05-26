@@ -35,7 +35,7 @@ jobs:
       - name: Build and push
         if: github.event_name != 'pull_request'
         run: |
-          IMAGE=${{ env.REGISTRY }}/${{ github.repository }}-${{ matrix.image_suffix }}
+          IMAGE=${{ env.REGISTRY }}/$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')-${{ matrix.image_suffix }}
           BRANCH=${{ github.ref_name }}
           SHA=$(echo ${{ github.sha }} | cut -c1-7)
 
