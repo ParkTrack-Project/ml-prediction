@@ -163,26 +163,38 @@ def build_prediction_vector(
     feats['is_precipitation'] = int(is_prec) if is_prec is not None else 0
 
     FALLBACK = 0.5
+    hourly_avgs = zone_meta.get('hourly_avgs', {})
+
+    def _hist_avg(hour_of_day: int) -> float:
+        h = hour_of_day % 24
+        return float(hourly_avgs.get(str(h), hourly_avgs.get(h, FALLBACK)))
+
     if recent_hourly.empty:
-        for h_ in LAG_HOURS:
-            feats[f'occupancy_lag_{h_}h'] = FALLBACK
+        # No recent data — use per-zone per-hour historical averages so predictions
+        # vary by time of day (3am ≠ 4pm) instead of a flat constant.
+        for lag_h in LAG_HOURS:
+            feats[f'occupancy_lag_{lag_h}h'] = _hist_avg(dt.hour - lag_h)
         for w in MA_WINDOWS:
-            feats[f'occupancy_ma_{w}h'] = FALLBACK
+            feats[f'occupancy_ma_{w}h'] = float(np.mean([_hist_avg(dt.hour - i) for i in range(1, w + 1)]))
     else:
         history   = recent_hourly.set_index('hour')['occupancy_rate'].sort_index()
         pred_hour = dt.floor('h')
         history   = history[history.index < pred_hour]
 
-        def get_lag(lag_h):
+        def get_lag(lag_h: int) -> float:
             t = pred_hour - pd.Timedelta(hours=lag_h)
             if t in history.index:
                 return float(history[t])
-            prior = history[history.index <= t]
-            return float(prior.iloc[-1]) if not prior.empty else FALLBACK
+            # Sparse data: use historical average for that hour rather than
+            # propagating the last known value across all lag positions.
+            return _hist_avg(t.hour)
 
-        def get_ma(w):
+        def get_ma(w: int) -> float:
             window = history[history.index >= pred_hour - pd.Timedelta(hours=w)]
-            return float(window.mean()) if not window.empty else FALLBACK
+            if not window.empty:
+                return float(window.mean())
+            hours = [(dt.hour - i) % 24 for i in range(1, w + 1)]
+            return float(np.mean([_hist_avg(h) for h in hours]))
 
         for lag_h in LAG_HOURS:
             feats[f'occupancy_lag_{lag_h}h'] = get_lag(lag_h)
