@@ -116,7 +116,7 @@ def load_recent_observations(zone_id: int, before_dt: datetime, hours: int = 25)
 def aggregate_hourly(df: pd.DataFrame) -> pd.DataFrame:
     """Aggregate raw observations to hourly buckets per zone."""
     if df.empty:
-        return df
+        return pd.DataFrame(columns=["zone_id", "hour", "occupancy_rate", "capacity"])
     df = df.copy()
     df["observed_at"] = pd.to_datetime(df["observed_at"], utc=True, errors="coerce")
     df = df.dropna(subset=["observed_at"])

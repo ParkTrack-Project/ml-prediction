@@ -69,8 +69,21 @@ def train(save: bool = True) -> LGBMWrapper:
         logger.warning("Weather unavailable (%s), using seasonal fallback", exc)
         weather_df = None
 
+    if hourly_df.empty:
+        logger.warning(
+            "No occupancy data in the last %d days — skipping training. "
+            "Try increasing TRAIN_DAYS_BACK or wait for data to accumulate.",
+            TRAIN_DAYS_BACK,
+        )
+        if os.path.exists(MODEL_FILE):
+            logger.info("Keeping existing model at %s", MODEL_FILE)
+            return LGBMWrapper.load(MODEL_FILE)
+        raise RuntimeError("No training data and no existing model to fall back to.")
+
     dataset = build_training_dataset(hourly_df, zone_meta_df, weather_df)
     n = len(dataset)
+    if n < 100:
+        logger.warning("Only %d training samples — model quality will be low.", n)
     logger.info("Dataset: %d samples, %d features", n, len(FEATURE_NAMES))
     for cls, name in CLASS_NAMES.items():
         cnt = int((dataset["label"] == cls).sum())
