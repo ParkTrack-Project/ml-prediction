@@ -51,12 +51,12 @@ def _load_once() -> None:
         _zone_meta = {int(k): v for k, v in json.load(f).items()}
 
 
-def predict(zone_id: int, predicted_for: datetime) -> PredictOutput:
+def predict(zone_id: int, predicted_for: datetime, recent_hourly=None) -> PredictOutput:
     """Predict parking occupancy for zone_id at predicted_for (UTC)."""
     _load_once()
 
     meta = _zone_meta.get(zone_id, {'capacity': 10, 'zone_type_standard': 1})
-    raw  = predict_for_zone(zone_id, predicted_for, _model, meta)
+    raw  = predict_for_zone(zone_id, predicted_for, _model, meta, recent_hourly=recent_hourly)
 
     return PredictOutput(
         occupancy_class=raw['class'],

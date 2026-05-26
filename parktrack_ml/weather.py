@@ -65,7 +65,13 @@ def _parse_hourly(camera_id: int, data: dict) -> list[tuple]:
     return rows
 
 
+_zone_camera_cache: dict[int, int] | None = None
+
+
 def _zone_to_camera_map(client: ParkTrackClient) -> dict[int, int]:
+    global _zone_camera_cache
+    if _zone_camera_cache is not None:
+        return _zone_camera_cache
     zones = client.get_zones()
     result = {}
     for z in zones:
@@ -73,6 +79,7 @@ def _zone_to_camera_map(client: ParkTrackClient) -> dict[int, int]:
         cid = z.get("camera_id")
         if zid and cid:
             result[int(zid)] = int(cid)
+    _zone_camera_cache = result
     return result
 
 

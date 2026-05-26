@@ -51,12 +51,14 @@ def predict_for_zone(
     model:         LGBMWrapper,
     zone_meta:     Dict,
     scaler:        Optional[object] = None,
+    recent_hourly: Optional[object] = None,
 ) -> dict:
     from .data_loader import load_recent_observations, aggregate_hourly
     from .weather import get_at as get_weather
 
-    raw = load_recent_observations(zone_id, predicted_for, hours=25)
-    recent_hourly = aggregate_hourly(raw) if not raw.empty else raw
+    if recent_hourly is None:
+        raw = load_recent_observations(zone_id, predicted_for, hours=25)
+        recent_hourly = aggregate_hourly(raw) if not raw.empty else raw
 
     wx       = get_weather(zone_id, predicted_for)
     features = build_prediction_vector(zone_id, predicted_for, recent_hourly, zone_meta, weather=wx)

@@ -116,14 +116,29 @@ def train(save: bool = True) -> LGBMWrapper:
     if save:
         model.save(MODEL_FILE)
 
-        zone_meta_dict = {
-            int(k): {kk: int(vv) for kk, vv in v.items()}
-            for k, v in (
-                zone_meta_df
-                .set_index("zone_id")[["capacity", "zone_type_standard"]]
-                .to_dict("index")
-            ).items()
-        }
+        # Per-zone per-hour historical averages — used as smarter fallback at inference
+        # when no recent occupancy data is available (e.g. forecasting 24h+ ahead).
+        hourly_avgs_by_zone: dict[int, dict[str, float]] = {}
+        if not hourly_df.empty:
+            hdf = hourly_df.copy()
+            hdf['_hod'] = hdf['hour'].dt.hour
+            for (zid, hod), grp in hdf.groupby(['zone_id', '_hod']):
+                zid_int = int(zid)
+                if zid_int not in hourly_avgs_by_zone:
+                    hourly_avgs_by_zone[zid_int] = {}
+                hourly_avgs_by_zone[zid_int][str(int(hod))] = round(float(grp['occupancy_rate'].mean()), 4)
+
+        zone_meta_dict: dict = {}
+        for zid, row in (
+            zone_meta_df.set_index("zone_id")[["capacity", "zone_type_standard"]].iterrows()
+        ):
+            zid_int = int(zid)
+            zone_meta_dict[zid_int] = {
+                "capacity":           int(row["capacity"]),
+                "zone_type_standard": int(row["zone_type_standard"]),
+                "hourly_avgs":        hourly_avgs_by_zone.get(zid_int, {}),
+            }
+
         with open(ZONE_META_FILE, "w") as f:
             json.dump(zone_meta_dict, f, indent=2)
 

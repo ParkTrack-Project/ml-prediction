@@ -164,10 +164,18 @@ def build_prediction_vector(
 
     FALLBACK = 0.5
     if recent_hourly.empty:
-        for h_ in LAG_HOURS:
-            feats[f'occupancy_lag_{h_}h'] = FALLBACK
+        # Use per-zone per-hour historical averages stored at training time.
+        # Falls back to 0.5 only if no training data exists for that zone.
+        hourly_avgs = zone_meta.get('hourly_avgs', {})
+
+        def _hist_avg(hour_of_day: int) -> float:
+            h = hour_of_day % 24
+            return float(hourly_avgs.get(str(h), hourly_avgs.get(h, FALLBACK)))
+
+        for lag_h in LAG_HOURS:
+            feats[f'occupancy_lag_{lag_h}h'] = _hist_avg(dt.hour - lag_h)
         for w in MA_WINDOWS:
-            feats[f'occupancy_ma_{w}h'] = FALLBACK
+            feats[f'occupancy_ma_{w}h'] = float(np.mean([_hist_avg(dt.hour - i) for i in range(1, w + 1)]))
     else:
         history   = recent_hourly.set_index('hour')['occupancy_rate'].sort_index()
         pred_hour = dt.floor('h')
