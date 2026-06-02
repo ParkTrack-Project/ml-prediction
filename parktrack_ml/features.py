@@ -178,6 +178,7 @@ def build_prediction_vector(
             feats[f'occupancy_ma_{w}h'] = float(np.mean([_hist_avg(dt.hour - i) for i in range(1, w + 1)]))
     else:
         history   = recent_hourly.set_index('hour')['occupancy_rate'].sort_index()
+        history   = history[~history.index.duplicated(keep='last')]
         pred_hour = dt.floor('h')
         history   = history[history.index < pred_hour]
 
@@ -185,14 +186,25 @@ def build_prediction_vector(
             t = pred_hour - pd.Timedelta(hours=lag_h)
             if t in history.index:
                 return float(history[t])
-            # Sparse data: use historical average for that hour rather than
-            # propagating the last known value across all lag positions.
+            # No direct match (future slot) — try same hour yesterday.
+            # Yesterday's 22:00 is far more predictive than the multi-day
+            # average, because it captures the real daily on/off pattern.
+            t_yesterday = t - pd.Timedelta(hours=24)
+            if t_yesterday in history.index:
+                return float(history[t_yesterday])
             return _hist_avg(t.hour)
 
         def get_ma(w: int) -> float:
             window = history[history.index >= pred_hour - pd.Timedelta(hours=w)]
             if not window.empty:
                 return float(window.mean())
+            # Try same window yesterday
+            window_yesterday = history[
+                (history.index >= pred_hour - pd.Timedelta(hours=w + 24)) &
+                (history.index <  pred_hour - pd.Timedelta(hours=24))
+            ]
+            if not window_yesterday.empty:
+                return float(window_yesterday.mean())
             hours = [(dt.hour - i) % 24 for i in range(1, w + 1)]
             return float(np.mean([_hist_avg(h) for h in hours]))
 
