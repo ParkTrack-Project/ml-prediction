@@ -82,9 +82,10 @@ LGBM_PARAMS = {
     "verbose":           -1,
 }
 
-TRAIN_DAYS_BACK  = int(os.environ.get("TRAIN_DAYS_BACK", "200"))
-ML_MODEL_TYPE    = "lightgbm"
-ML_MODEL_VERSION = "3.0"
+TRAIN_DAYS_BACK   = int(os.environ.get("TRAIN_DAYS_BACK", "200"))
+FORECAST_HOURS    = int(os.environ.get("FORECAST_HOURS", "48"))
+ML_MODEL_TYPE     = "lightgbm"
+ML_MODEL_VERSION  = "3.0"
 
 # ---------------------------------------------------------------------------
 # Scheduling
