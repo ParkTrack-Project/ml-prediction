@@ -70,10 +70,10 @@ TEMP_FALLBACK_BY_MONTH = {
 LGBM_PARAMS = {
     "objective":         "multiclass",
     "num_class":         3,
-    "num_leaves":        63,
-    "n_estimators":      500,
+    "num_leaves":        31,    # было 63 — меньше листьев = проще деревья
+    "n_estimators":      1000,  # early stopping остановит раньше реального предела
     "learning_rate":     0.05,
-    "min_child_samples": 20,
+    "min_child_samples": 30,    # было 20 — лист требует минимум 30 примеров
     "subsample":         0.8,
     "colsample_bytree":  0.8,
     "reg_alpha":         0.1,
