@@ -9,7 +9,7 @@ import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 
-from .config import API_URL, API_TOKEN, ML_MODEL_TYPE, ML_MODEL_VERSION
+from .config import API_URL, API_TOKEN, ML_MODEL_TYPE, ML_MODEL_VERSION, FORECAST_HOURS
 from .api_client import ParkTrackClient
 from .interfaces import predict
 from .data_loader import load_recent_observations, aggregate_hourly
@@ -76,9 +76,9 @@ def run() -> None:
     base  = now.replace(second=0, microsecond=0)
     slots = [
         base.replace(minute=m) + timedelta(hours=h)
-        for h in range(25) for m in (0, 30)
+        for h in range(FORECAST_HOURS + 1) for m in (0, 30)
         if base.replace(minute=m) + timedelta(hours=h) > now
-    ][:48]
+    ][:FORECAST_HOURS * 2]
 
     # Pre-fetch recent observations ONCE per zone, not once per (zone, slot).
     # Without this we'd make zones×slots = potentially 720+ API calls per run.
