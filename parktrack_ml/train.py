@@ -102,7 +102,12 @@ def train(save: bool = True) -> LGBMWrapper:
 
     model = LGBMWrapper(params=dict(LGBM_PARAMS))
     model.feature_names = FEATURE_NAMES
-    model.fit(X_train, y_train, categorical_feature=cat_indices if cat_indices else None)
+    model.fit(
+        X_train, y_train,
+        X_val=X_val, y_val=y_val,
+        categorical_feature=cat_indices if cat_indices else None,
+    )
+    logger.info("Best iteration: %d", model._booster.best_iteration)
 
     logger.info("--- Train set ---")
     _metrics(y_train, model.predict(X_train))

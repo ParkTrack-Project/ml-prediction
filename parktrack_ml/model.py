@@ -115,10 +115,12 @@ class LGBMWrapper:
         self.feature_names = None
 
     def fit(self, X: np.ndarray, y: np.ndarray,
+            X_val: np.ndarray | None = None,
+            y_val: np.ndarray | None = None,
             categorical_feature: list[str] | None = None) -> None:
         import lightgbm as lgb
 
-        n_estimators = self.params.pop("n_estimators", 500)
+        n_estimators = self.params.pop("n_estimators", 1000)
         params = {**self.params, "verbose": -1}
 
         feat_names = self.feature_names or [str(i) for i in range(X.shape[1])]
@@ -127,10 +129,27 @@ class LGBMWrapper:
             feature_name=feat_names,
             categorical_feature=categorical_feature or "auto",
         )
-        callbacks = [lgb.log_evaluation(period=50)]
+
+        valid_sets  = [train_ds]
+        valid_names = ["train"]
+        if X_val is not None and y_val is not None:
+            val_ds = lgb.Dataset(X_val, label=y_val, reference=train_ds,
+                                 feature_name=feat_names)
+            valid_sets.append(val_ds)
+            valid_names.append("val")
+            # Stop when val loss hasn't improved for 50 rounds
+            callbacks = [
+                lgb.early_stopping(stopping_rounds=50, verbose=False),
+                lgb.log_evaluation(period=100),
+            ]
+        else:
+            callbacks = [lgb.log_evaluation(period=100)]
+
         self._booster = lgb.train(
             params, train_ds,
             num_boost_round=n_estimators,
+            valid_sets=valid_sets,
+            valid_names=valid_names,
             callbacks=callbacks,
         )
         self.params["n_estimators"] = n_estimators
