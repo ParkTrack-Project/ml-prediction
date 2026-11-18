@@ -24,6 +24,7 @@ MODEL_FILE         = os.path.join(MODEL_PATH, "model.lgb")
 MODEL_WEIGHTS_FILE = os.path.join(MODEL_PATH, "model_weights.json")  # LR fallback
 SCALER_FILE        = os.path.join(MODEL_PATH, "scaler_params.json")
 ZONE_META_FILE     = os.path.join(MODEL_PATH, "zone_meta.json")
+MODEL_V4_FILE      = os.path.join(MODEL_PATH, "model_v4.json")  # meta; boosters lie next to it
 
 # ---------------------------------------------------------------------------
 # Features
@@ -85,7 +86,39 @@ LGBM_PARAMS = {
 TRAIN_DAYS_BACK   = int(os.environ.get("TRAIN_DAYS_BACK", "200"))
 FORECAST_HOURS    = int(os.environ.get("FORECAST_HOURS", "48"))
 ML_MODEL_TYPE     = "lightgbm"
-ML_MODEL_VERSION  = "3.0"
+ML_MODEL_VERSION  = "4.1"
+
+# ---------------------------------------------------------------------------
+# v4: horizon-specific models
+# ---------------------------------------------------------------------------
+
+# Model H is used when the newest known hour is <= H hours before the target.
+HORIZONS            = [1, 3, 6, 12, 24, 48, 72]
+LOOKBACK_HOURS      = 24 * 8      # history needed at inference (week-ago lag + margin)
+VAL_DAYS            = 14
+MIN_ZONE_CONFIDENCE = 0.30        # zones whose detections (cars found) have lower mean confidence are not trained on
+LOCAL_TIMEZONE      = "Europe/Moscow"
+PROFILE_DAYS        = 45
+PROFILE_BLOCK_DAYS  = 7
+FFILL_LIMIT         = 2
+LGBM_THREADS        = max(1, int(os.environ.get("LGBM_THREADS", "4")))
+
+LGBM_V4_PARAMS = {
+    "num_leaves":        31,
+    "learning_rate":     0.05,
+    "min_child_samples": 50,
+    "subsample":         0.8,
+    "subsample_freq":    1,
+    "colsample_bytree":  0.8,
+    "reg_alpha":         0.1,
+    "reg_lambda":        0.1,
+    "random_state":      42,
+    "verbose":           -1,
+    "num_threads":       LGBM_THREADS,
+    "min_data_per_group": 50,
+    "cat_smooth":        20,
+}
+MAX_ROUNDS = 1000
 
 # ---------------------------------------------------------------------------
 # Scheduling

@@ -19,7 +19,7 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.events import EVENT_JOB_ERROR
 
-from .config import MODEL_FILE, RETRAIN_HOUR_UTC, TRAIN_DAYS_BACK
+from .config import MODEL_V4_FILE, RETRAIN_HOUR_UTC, TRAIN_DAYS_BACK
 from .weather import backfill as backfill_weather, fetch_latest as fetch_weather
 from .forecaster import run as generate_forecasts
 from .train import train
@@ -51,14 +51,16 @@ def _on_job_error(event) -> None:
     logger.error("Job '%s' raised %r", event.job_id, event.exception)
 
 
-def startup() -> None:
-    logger.info("=== SmartParking ML service startup ===")
-
+def _backfill_weather() -> None:
     logger.info("Backfilling weather history (%d days)...", TRAIN_DAYS_BACK)
     n = backfill_weather(days=TRAIN_DAYS_BACK)
     logger.info("  %d weather observations posted", n)
 
-    if not os.path.exists(MODEL_FILE):
+
+def startup() -> None:
+    logger.info("=== SmartParking ML service startup ===")
+
+    if not os.path.exists(MODEL_V4_FILE):
         logger.info("No saved model — training from scratch...")
         try:
             train()
@@ -80,10 +82,17 @@ def main() -> None:
 
     scheduler = BlockingScheduler(timezone="UTC")
     scheduler.add_listener(_on_job_error, EVENT_JOB_ERROR)
+    scheduler.add_job(
+        _backfill_weather,
+        "date",
+        id="weather_backfill",
+        name="Backfill weather history",
+        misfire_grace_time=None,
+    )
 
     scheduler.add_job(
         generate_forecasts,
-        CronTrigger(minute="0,30"),
+        CronTrigger(minute="0,30", timezone="UTC"),
         id="forecasts",
         name="Generate & post forecasts",
         misfire_grace_time=60,
@@ -91,7 +100,7 @@ def main() -> None:
     )
     scheduler.add_job(
         fetch_weather,
-        CronTrigger(minute=5),
+        CronTrigger(minute=5, timezone="UTC"),
         id="weather",
         name="Fetch weather from Open-Meteo",
         misfire_grace_time=120,
@@ -99,7 +108,7 @@ def main() -> None:
     )
     scheduler.add_job(
         _retrain,
-        CronTrigger(hour=RETRAIN_HOUR_UTC, minute=0),
+        CronTrigger(hour=RETRAIN_HOUR_UTC, minute=0, timezone="UTC"),
         id="retrain",
         name="Retrain model",
         misfire_grace_time=600,
