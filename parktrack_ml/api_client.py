@@ -4,11 +4,24 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from time import sleep
 from typing import Any
 
 import requests
+from requests.adapters import HTTPAdapter
 
 log = logging.getLogger(__name__)
+
+
+_GET_ATTEMPTS = 3
+_GET_BACKOFF_SECONDS = 0.5
+_GET_BACKOFF_MAX = 4.0
+
+
+def _raise_for_status(response: requests.Response) -> None:
+    response.raise_for_status()
+    if 300 <= response.status_code < 400:
+        raise requests.HTTPError("Unexpected redirect from ParkTrack API", response=response)
 
 
 class ParkTrackClient:
@@ -16,23 +29,46 @@ class ParkTrackClient:
         self._base = base_url.rstrip("/")
         self._timeout = timeout
         self._session = requests.Session()
+        self._session.mount("https://", HTTPAdapter(max_retries=0))
+        self._session.mount("http://", HTTPAdapter(max_retries=0))
         self._session.headers.update(
             {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
         )
+
+    def _get(self, path: str, **kwargs) -> list[dict]:
+        for attempt in range(_GET_ATTEMPTS):
+            response = None
+            try:
+                response = self._session.get(
+                    f"{self._base}{path}", timeout=self._timeout,
+                    stream=True, allow_redirects=False, **kwargs,
+                )
+                _raise_for_status(response)
+                return response.json()
+            except requests.RequestException as exc:
+                transient = isinstance(exc, (
+                    requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError,
+                )) and not isinstance(exc, requests.exceptions.SSLError)
+                if isinstance(exc, requests.HTTPError):
+                    transient = response is not None and (
+                        response.status_code == 429 or 500 <= response.status_code < 600
+                    )
+                if not transient or attempt + 1 == _GET_ATTEMPTS:
+                    raise
+            finally:
+                if response is not None:
+                    response.close()
+            sleep(min(_GET_BACKOFF_SECONDS * 2**attempt, _GET_BACKOFF_MAX))
 
     # ------------------------------------------------------------------
     # Zones & cameras
     # ------------------------------------------------------------------
 
     def get_zones(self) -> list[dict]:
-        resp = self._session.get(f"{self._base}/zones", timeout=self._timeout)
-        resp.raise_for_status()
-        return resp.json()
+        return self._get("/zones")
 
     def get_cameras(self) -> list[dict]:
-        resp = self._session.get(f"{self._base}/cameras", timeout=self._timeout)
-        resp.raise_for_status()
-        return resp.json()
+        return self._get("/cameras")
 
     # ------------------------------------------------------------------
     # Occupancy
@@ -53,11 +89,7 @@ class ParkTrackClient:
         if to_dt is not None:
             params["to"] = _fmt(to_dt)
 
-        resp = self._session.get(
-            f"{self._base}/occupancy", params=params, timeout=self._timeout
-        )
-        resp.raise_for_status()
-        return resp.json()
+        return self._get("/occupancy", params=params)
 
     # ------------------------------------------------------------------
     # Weather
@@ -80,11 +112,7 @@ class ParkTrackClient:
         if latest_only:
             params["latest_only"] = "true"
 
-        resp = self._session.get(
-            f"{self._base}/weather", params=params, timeout=self._timeout
-        )
-        resp.raise_for_status()
-        return resp.json()
+        return self._get("/weather", params=params)
 
     def post_weather(
         self,
@@ -101,11 +129,11 @@ class ParkTrackClient:
             "precipitation": round(float(max(0.0, precipitation)), 2),
         }
         resp = self._session.post(
-            f"{self._base}/weather/new", json=payload, timeout=self._timeout
+            f"{self._base}/weather/new", json=payload, timeout=self._timeout, allow_redirects=False,
         )
         if resp.status_code == 409:
             return False
-        resp.raise_for_status()
+        _raise_for_status(resp)
         return True
 
     # ------------------------------------------------------------------
@@ -143,7 +171,7 @@ class ParkTrackClient:
             payload["metadata"] = metadata
 
         resp = self._session.post(
-            f"{self._base}/forecasts/new", json=payload, timeout=self._timeout
+            f"{self._base}/forecasts/new", json=payload, timeout=self._timeout, allow_redirects=False,
         )
 
         if resp.status_code == 409:
@@ -154,11 +182,13 @@ class ParkTrackClient:
             )
             return None
 
-        resp.raise_for_status()
+        _raise_for_status(resp)
         return resp.json()["forecast_id"]
 
 
 def _fmt(dt: datetime) -> str:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    dt = dt.astimezone(timezone.utc)
+    fmt = "%Y-%m-%dT%H:%M:%S.%fZ" if dt.microsecond else "%Y-%m-%dT%H:%M:%SZ"
+    return dt.strftime(fmt)

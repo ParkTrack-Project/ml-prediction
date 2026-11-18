@@ -6,14 +6,14 @@ print(result.occupancy_class)         # "Medium"
 print(result.predicted_occupied)      # 5
 print(result.probability_free_space)  # 0.73
 """
-import json
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal, Optional
+from threading import RLock
+from typing import Literal, Optional, Tuple
 
-from .config import MODEL_FILE, ZONE_META_FILE, FEATURE_NAMES
-from .model import LGBMWrapper
-from .predict import predict_for_zone
+from .config import MODEL_V4_FILE
+from .model_h import HorizonModels
+from .predict import predict_for_zone, predict_many_for_zone
 
 
 @dataclass
@@ -29,35 +29,42 @@ class PredictOutput:
     capacity:               int
 
 
-_model:     Optional[LGBMWrapper] = None
-_zone_meta: Optional[dict]        = None
+_snapshot: Optional[Tuple[HorizonModels, dict]] = None
+_lock = RLock()
 
 
-def _load_once() -> None:
-    global _model, _zone_meta
-    if _model is not None:
-        return
-
-    _model = LGBMWrapper.load(MODEL_FILE)
-
-    saved_features = _model.feature_names or []
-    if saved_features and set(saved_features) != set(FEATURE_NAMES):
-        raise RuntimeError(
-            f"Feature mismatch — model has {len(saved_features)} features, "
-            f"config has {len(FEATURE_NAMES)}. Retrain: python -m parktrack_ml.train"
-        )
-
-    with open(ZONE_META_FILE) as f:
-        _zone_meta = {int(k): v for k, v in json.load(f).items()}
+def _read_snapshot() -> Tuple[HorizonModels, dict]:
+    models, meta = HorizonModels.load(MODEL_V4_FILE)
+    prepared_meta = {
+        "zone_meta": {int(k): v for k, v in meta["zone_meta"].items()},
+        "profiles":  {int(k): v for k, v in meta["profiles"].items()},
+        "data_until": meta.get("data_until"),
+        "trained_at": meta.get("trained_at"),
+    }
+    return models, prepared_meta
 
 
-def predict(zone_id: int, predicted_for: datetime, recent_hourly=None) -> PredictOutput:
+def _load_once() -> Tuple[HorizonModels, dict]:
+    global _snapshot
+    with _lock:
+        if _snapshot is None:
+            _snapshot = _read_snapshot()
+        return _snapshot
+
+
+def predict(zone_id: int, predicted_for: datetime, recent_hourly=None,
+            as_of: Optional[datetime] = None) -> PredictOutput:
     """Predict parking occupancy for zone_id at predicted_for (UTC)."""
-    _load_once()
+    models, meta = _load_once()
+    _validate_as_of(meta, as_of)
+    zone_meta = meta["zone_meta"].get(zone_id, {'zone_type_standard': 1})
+    raw = predict_for_zone(zone_id, predicted_for, models, zone_meta, meta["profiles"],
+                           recent_hourly=recent_hourly, as_of=as_of)
 
-    meta = _zone_meta.get(zone_id, {'capacity': 10, 'zone_type_standard': 1})
-    raw  = predict_for_zone(zone_id, predicted_for, _model, meta, recent_hourly=recent_hourly)
+    return _output(raw)
 
+
+def _output(raw: dict) -> PredictOutput:
     return PredictOutput(
         occupancy_class=raw['class'],
         class_code=raw['class_code'],
@@ -71,8 +78,27 @@ def predict(zone_id: int, predicted_for: datetime, recent_hourly=None) -> Predic
     )
 
 
+def _validate_as_of(meta, as_of):
+    if as_of is None:
+        return
+    from .features_h import utc_timestamp
+    for field in ("data_until", "trained_at"):
+        if meta.get(field) and utc_timestamp(meta[field]) > utc_timestamp(as_of):
+            raise ValueError(f"Model {field} is later than the requested as_of")
+
+
+def predict_many(zone_id: int, predicted_for, recent_hourly=None, as_of=None) -> list[PredictOutput]:
+    models, meta = _load_once()
+    _validate_as_of(meta, as_of)
+    zone_meta = meta["zone_meta"].get(zone_id, {'zone_type_standard': 1})
+    rows = predict_many_for_zone(zone_id, predicted_for, models, zone_meta, meta["profiles"],
+                                 recent_hourly=recent_hourly, as_of=as_of)
+    return [_output(row) for row in rows]
+
+
 def reload() -> None:
     """Reload model artifacts from disk (call after retraining)."""
-    global _model, _zone_meta
-    _model = _zone_meta = None
-    _load_once()
+    global _snapshot
+    with _lock:
+        snapshot = _read_snapshot()
+        _snapshot = snapshot
